@@ -2,6 +2,7 @@ export interface ParsedNote {
     frontmatter: Record<string, any>;
     content: string;
     originalContent: string;
+    matter?: string;
 }
 export interface NoteWriteParams {
     path: string;

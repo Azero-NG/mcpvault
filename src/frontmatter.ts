@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { parseDocument } from 'yaml';
 import type { ParsedNote, FrontmatterValidationResult } from './types.js';
 
 /**
@@ -34,14 +35,16 @@ export class FrontmatterHandler {
       return {
         frontmatter: parsed.data,
         content: parsed.content,
-        originalContent: content
+        originalContent: content,
+        matter: parsed.matter
       };
     } catch (error) {
       // If parsing fails, treat as content without frontmatter
       return {
         frontmatter: {},
         content: content,
-        originalContent: content
+        originalContent: content,
+        matter: ''
       };
     }
   }
@@ -131,6 +134,31 @@ export class FrontmatterHandler {
     }
   }
 
+  preserveStringify(rawMatter: string, updates: Record<string, any>, content: string): string {
+    try {
+      if (!rawMatter || rawMatter.trim() === '') {
+        // No existing frontmatter to preserve - fall back to regular stringify
+        if (!updates || Object.keys(updates).length === 0) {
+          return content;
+        }
+        return matter.stringify(content, updates);
+      }
+
+      const doc = parseDocument(rawMatter.trimStart());
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined) {
+          doc.delete(key);
+        } else {
+          doc.set(key, value);
+        }
+      }
+      const yamlContent = doc.toString();
+      return `---\n${yamlContent}---\n${content}`;
+    } catch (error) {
+      throw new Error(`Failed to stringify frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   extractFrontmatter(content: string): Record<string, any> {
     const parsed = this.parse(content);
     return parsed.frontmatter;
@@ -145,6 +173,6 @@ export class FrontmatterHandler {
       throw new Error(`Invalid frontmatter: ${validation.errors.join(', ')}`);
     }
 
-    return this.stringify(updatedFrontmatter, parsed.content);
+    return this.preserveStringify(parsed.matter || '', updates, parsed.content);
   }
 }

@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { parseDocument } from 'yaml';
 /**
  * Parse a frontmatter value that may be a JSON string (LLM clients sometimes
  * pass frontmatter as a serialized JSON string instead of an object).
@@ -32,7 +33,8 @@ export class FrontmatterHandler {
             return {
                 frontmatter: parsed.data,
                 content: parsed.content,
-                originalContent: content
+                originalContent: content,
+                matter: parsed.matter
             };
         }
         catch (error) {
@@ -40,7 +42,8 @@ export class FrontmatterHandler {
             return {
                 frontmatter: {},
                 content: content,
-                originalContent: content
+                originalContent: content,
+                matter: ''
             };
         }
     }
@@ -113,6 +116,31 @@ export class FrontmatterHandler {
             }
         }
     }
+    preserveStringify(rawMatter, updates, content) {
+        try {
+            if (!rawMatter || rawMatter.trim() === '') {
+                // No existing frontmatter to preserve - fall back to regular stringify
+                if (!updates || Object.keys(updates).length === 0) {
+                    return content;
+                }
+                return matter.stringify(content, updates);
+            }
+            const doc = parseDocument(rawMatter.trimStart());
+            for (const [key, value] of Object.entries(updates)) {
+                if (value === undefined) {
+                    doc.delete(key);
+                }
+                else {
+                    doc.set(key, value);
+                }
+            }
+            const yamlContent = doc.toString();
+            return `---\n${yamlContent}---\n${content}`;
+        }
+        catch (error) {
+            throw new Error(`Failed to stringify frontmatter: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
     extractFrontmatter(content) {
         const parsed = this.parse(content);
         return parsed.frontmatter;
@@ -124,6 +152,6 @@ export class FrontmatterHandler {
         if (!validation.isValid) {
             throw new Error(`Invalid frontmatter: ${validation.errors.join(', ')}`);
         }
-        return this.stringify(updatedFrontmatter, parsed.content);
+        return this.preserveStringify(parsed.matter || '', updates, parsed.content);
     }
 }

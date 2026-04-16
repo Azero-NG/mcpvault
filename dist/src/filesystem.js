@@ -152,11 +152,15 @@ export class FileSystemService {
                     const mergedFrontmatter = frontmatter
                         ? { ...existingNote.frontmatter, ...frontmatter }
                         : existingNote.frontmatter;
-                    if (mode === 'append') {
-                        finalContent = this.frontmatterHandler.stringify(mergedFrontmatter, existingNote.content + content);
+                    const mergedContent = mode === 'append'
+                        ? existingNote.content + content
+                        : content + existingNote.content;
+                    if (existingNote.matter && existingNote.matter.trim() !== '') {
+                        // Preserve raw formatting for unmodified fields by only applying explicit updates
+                        finalContent = this.frontmatterHandler.preserveStringify(existingNote.matter, frontmatter || {}, mergedContent);
                     }
-                    else if (mode === 'prepend') {
-                        finalContent = this.frontmatterHandler.stringify(mergedFrontmatter, content + existingNote.content);
+                    else {
+                        finalContent = this.frontmatterHandler.stringify(mergedFrontmatter, mergedContent);
                     }
                 }
             }
@@ -652,12 +656,20 @@ export class FileSystemService {
         if (!validation.isValid) {
             throw new Error(`Invalid frontmatter: ${validation.errors.join(', ')}`);
         }
-        // Update the note with new frontmatter, preserving content
-        await this.writeNote({
-            path,
-            content: note.content,
-            frontmatter: newFrontmatter
-        });
+        const fullPath = this.resolvePath(path);
+        if (merge && note.matter && note.matter.trim() !== '') {
+            // Preserve raw formatting for unmodified fields
+            const updatedContent = this.frontmatterHandler.preserveStringify(note.matter, frontmatter, note.content);
+            await writeFile(fullPath, updatedContent, 'utf-8');
+        }
+        else {
+            // Replace frontmatter entirely (or no existing matter to preserve)
+            await this.writeNote({
+                path,
+                content: note.content,
+                frontmatter: newFrontmatter
+            });
+        }
     }
     async getNotesInfo(paths) {
         const results = await Promise.allSettled(paths.map(async (path) => {
@@ -740,23 +752,31 @@ export class FileSystemService {
             else if (operation === 'remove') {
                 newTags = newTags.filter(tag => !tags.includes(tag));
             }
-            // Update frontmatter with new tags
-            const updatedFrontmatter = {
-                ...note.frontmatter
-            };
+            // Build tag updates for preserveStringify
+            const tagUpdates = {};
             if (newTags.length > 0) {
-                updatedFrontmatter.tags = newTags;
+                tagUpdates.tags = newTags;
             }
-            else if ('tags' in updatedFrontmatter) {
-                delete updatedFrontmatter.tags;
+            else {
+                tagUpdates.tags = undefined;
             }
-            // Write back the note with updated frontmatter
-            await this.writeNote({
-                path,
-                content: note.content,
-                frontmatter: updatedFrontmatter,
-                mode: 'overwrite'
-            });
+            // Write back the note with updated frontmatter, preserving raw formatting for unmodified fields
+            let updatedContent;
+            if (note.matter && note.matter.trim() !== '') {
+                updatedContent = this.frontmatterHandler.preserveStringify(note.matter, tagUpdates, note.content);
+            }
+            else {
+                const updatedFrontmatter = { ...note.frontmatter };
+                if (newTags.length > 0) {
+                    updatedFrontmatter.tags = newTags;
+                }
+                else {
+                    delete updatedFrontmatter.tags;
+                }
+                updatedContent = this.frontmatterHandler.stringify(updatedFrontmatter, note.content);
+            }
+            const fullPath = this.resolvePath(path);
+            await writeFile(fullPath, updatedContent, 'utf-8');
             return {
                 path,
                 operation,

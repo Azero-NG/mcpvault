@@ -604,7 +604,10 @@ test("write_note with append mode preserves frontmatter", async () => {
 
   expect(note.frontmatter.title).toBe("Original");
   expect(note.frontmatter.status).toBe("draft");
-  expect(note.frontmatter.updated).toBe("2023-12-01");
+  // Verify raw file preserves plain date format (gray-matter parses unquoted dates as Date objects)
+  const rawFile = await readFile(join(testVaultPath, "append-test.md"), "utf-8");
+  expect(rawFile).toContain("updated: 2023-12-01");
+  expect(rawFile).not.toContain("T00:00:00.000Z");
   expect(note.content.trim()).toBe("Original content.\n\nAppended content.");
 });
 

@@ -10,6 +10,7 @@ export declare class FrontmatterHandler {
     stringify(frontmatterData: Record<string, any>, content: string): string;
     validate(frontmatterData: Record<string, any>): FrontmatterValidationResult;
     private checkForProblematicValues;
+    preserveStringify(rawMatter: string, updates: Record<string, any>, content: string): string;
     extractFrontmatter(content: string): Record<string, any>;
     updateFrontmatter(content: string, updates: Record<string, any>): string;
 }

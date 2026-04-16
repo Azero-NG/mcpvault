@@ -103,9 +103,51 @@ Some content here.`;
   const result = handler.updateFrontmatter(content, updates);
 
   expect(result).toContain("title: New Title");
-  expect(result).toContain("modified: '2023-12-01'");
+  expect(result).toContain("modified: 2023-12-01");
   expect(result).toContain("tags:");
   expect(result).toContain("# Content");
+});
+
+test("update frontmatter preserves date format (#77)", () => {
+  const content = `---
+date: 2026-03-16
+---
+# Content`;
+
+  const result = handler.updateFrontmatter(content, { title: "New Title" });
+
+  expect(result).toContain("date: 2026-03-16");
+  expect(result).not.toContain("T00:00:00.000Z");
+});
+
+test("update frontmatter preserves HH:MM time format (#75)", () => {
+  const content = `---
+time_start: 10:00
+time_end: 14:30
+---
+# Content`;
+
+  const result = handler.updateFrontmatter(content, { animal: "dolphin" });
+
+  expect(result).toContain("time_start: 10:00");
+  expect(result).toContain("time_end: 14:30");
+  expect(result).not.toContain("time_start: 600");
+  expect(result).not.toContain("time_end: 870");
+});
+
+test("update frontmatter preserves quote styles (#76)", () => {
+  const content = `---
+categories:
+  - "[[Meetings]]"
+people:
+  - "[[Bob]]"
+---
+# Content`;
+
+  const result = handler.updateFrontmatter(content, { status: "done" });
+
+  expect(result).toContain('"[[Meetings]]"');
+  expect(result).toContain('"[[Bob]]"');
 });
 
 describe("parseFrontmatter", () => {
