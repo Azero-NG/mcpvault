@@ -1413,3 +1413,287 @@ test("listAllTags skips system directories", async () => {
   expect(tags).toHaveLength(1);
   expect(tags[0]?.tag).toBe("visible");
 });
+
+// ============================================================================
+// UPLOAD FILE TESTS
+// ============================================================================
+
+test("upload_file copies binary file from host to vault", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-src-"));
+  const sourcePath = join(sourceDir, "image.png");
+  const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x42]);
+
+  try {
+    await writeFile(sourcePath, binaryContent);
+
+    const result = await fileSystem.uploadFile({
+      sourcePath,
+      vaultPath: "attachments/image.png"
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.bytes).toBe(binaryContent.length);
+    expect(result.message).toContain("Successfully uploaded");
+
+    const uploaded = await readFile(join(testVaultPath, "attachments/image.png"));
+    expect(Buffer.compare(uploaded, binaryContent)).toBe(0);
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file rejects relative sourcePath", async () => {
+  const result = await fileSystem.uploadFile({
+    sourcePath: "relative/path.png",
+    vaultPath: "attachments/x.png"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("must be an absolute path");
+});
+
+test("upload_file rejects symbolic link sources", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-symlink-"));
+  const realPath = join(sourceDir, "real.png");
+  const linkPath = join(sourceDir, "link.png");
+
+  try {
+    await writeFile(realPath, Buffer.from([0x01, 0x02]));
+    await symlink(realPath, linkPath);
+
+    const result = await fileSystem.uploadFile({
+      sourcePath: linkPath,
+      vaultPath: "attachments/from-link.png"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("symbolic link");
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file refuses to overwrite by default", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-collision-"));
+  const sourcePath = join(sourceDir, "doc.pdf");
+
+  try {
+    await writeFile(sourcePath, Buffer.from([0xaa, 0xbb]));
+    await mkdir(join(testVaultPath, "files"), { recursive: true });
+    await writeFile(join(testVaultPath, "files/doc.pdf"), Buffer.from([0xcc]));
+
+    const result = await fileSystem.uploadFile({
+      sourcePath,
+      vaultPath: "files/doc.pdf"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Target file already exists");
+
+    const existing = await readFile(join(testVaultPath, "files/doc.pdf"));
+    expect(Buffer.compare(existing, Buffer.from([0xcc]))).toBe(0);
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file overwrites when overwrite=true", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-overwrite-"));
+  const sourcePath = join(sourceDir, "doc.pdf");
+  const newContent = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+
+  try {
+    await writeFile(sourcePath, newContent);
+    await mkdir(join(testVaultPath, "files"), { recursive: true });
+    await writeFile(join(testVaultPath, "files/doc.pdf"), Buffer.from([0xcc]));
+
+    const result = await fileSystem.uploadFile({
+      sourcePath,
+      vaultPath: "files/doc.pdf",
+      overwrite: true
+    });
+
+    expect(result.success).toBe(true);
+
+    const replaced = await readFile(join(testVaultPath, "files/doc.pdf"));
+    expect(Buffer.compare(replaced, newContent)).toBe(0);
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file blocks restricted vault paths", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-blocked-"));
+  const sourcePath = join(sourceDir, "x.png");
+
+  try {
+    await writeFile(sourcePath, Buffer.from([0x01]));
+
+    const result = await fileSystem.uploadFile({
+      sourcePath,
+      vaultPath: ".obsidian/snuck-in.png"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Access denied");
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file enforces size limit from MCPVAULT_UPLOAD_MAX_SIZE_MB", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-size-"));
+  const sourcePath = join(sourceDir, "big.bin");
+  // 200KB
+  const big = Buffer.alloc(200 * 1024, 0x77);
+  const previous = process.env.MCPVAULT_UPLOAD_MAX_SIZE_MB;
+
+  try {
+    await writeFile(sourcePath, big);
+    // Set limit to 0.1 MB (~100KB) so 200KB exceeds it
+    process.env.MCPVAULT_UPLOAD_MAX_SIZE_MB = "0.1";
+
+    const result = await fileSystem.uploadFile({
+      sourcePath,
+      vaultPath: "files/big.bin"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("exceeds upload size limit");
+    expect(result.message).toContain("MCPVAULT_UPLOAD_MAX_SIZE_MB");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MCPVAULT_UPLOAD_MAX_SIZE_MB;
+    } else {
+      process.env.MCPVAULT_UPLOAD_MAX_SIZE_MB = previous;
+    }
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+test("upload_file reports source not found", async () => {
+  const result = await fileSystem.uploadFile({
+    sourcePath: "/nonexistent/path/to/nothing.png",
+    vaultPath: "attachments/x.png"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("Source file not found");
+});
+
+test("upload_file rejects directory sources", async () => {
+  const sourceDir = await mkdtemp(join(tmpdir(), "mcpvault-upload-dir-"));
+
+  try {
+    const result = await fileSystem.uploadFile({
+      sourcePath: sourceDir,
+      vaultPath: "attachments/something.bin"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("not a regular file");
+  } finally {
+    await rm(sourceDir, { recursive: true });
+  }
+});
+
+// ============================================================================
+// DELETE FILE TESTS
+// ============================================================================
+
+test("delete_file removes any extension", async () => {
+  await mkdir(join(testVaultPath, "attachments"), { recursive: true });
+  await writeFile(join(testVaultPath, "attachments/photo.png"), Buffer.from([0x89, 0x50]));
+
+  const result = await fileSystem.deleteFile({
+    path: "attachments/photo.png",
+    confirmPath: "attachments/photo.png"
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.message).toContain("Successfully deleted");
+
+  await expect(readFile(join(testVaultPath, "attachments/photo.png")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("delete_file requires matching confirmPath", async () => {
+  await writeFile(join(testVaultPath, "x.pdf"), Buffer.from([0x01]));
+
+  const result = await fileSystem.deleteFile({
+    path: "x.pdf",
+    confirmPath: "y.pdf"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("confirmation path does not match");
+  const survivor = await readFile(join(testVaultPath, "x.pdf"));
+  expect(Buffer.compare(survivor, Buffer.from([0x01]))).toBe(0);
+});
+
+test("delete_file blocks restricted system paths", async () => {
+  const result = await fileSystem.deleteFile({
+    path: ".obsidian/workspace.json",
+    confirmPath: ".obsidian/workspace.json"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("Access denied");
+});
+
+test("delete_file rejects directories", async () => {
+  await mkdir(join(testVaultPath, "attachments/nested"), { recursive: true });
+
+  const result = await fileSystem.deleteFile({
+    path: "attachments/nested",
+    confirmPath: "attachments/nested"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("is not a file");
+});
+
+test("delete_file with local trash mode preserves binary content", async () => {
+  await mkdir(join(testVaultPath, "files"), { recursive: true });
+  const binary = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+  await writeFile(join(testVaultPath, "files/data.bin"), binary);
+
+  const result = await fileSystem.deleteFile({
+    path: "files/data.bin",
+    confirmPath: "files/data.bin",
+    trashMode: 'local'
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.message).toContain("vault trash");
+  await expect(readFile(join(testVaultPath, "files/data.bin")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+
+  const trashed = await readFile(join(testVaultPath, ".trash/files/data.bin"));
+  expect(Buffer.compare(trashed, binary)).toBe(0);
+});
+
+test("delete_file with system trash mode succeeds", async () => {
+  await writeFile(join(testVaultPath, "to-system-trash.png"), Buffer.from([0x01, 0x02]));
+
+  const result = await fileSystem.deleteFile({
+    path: "to-system-trash.png",
+    confirmPath: "to-system-trash.png",
+    trashMode: 'system'
+  });
+
+  expect(result.success).toBe(true);
+  expect(result.message).toContain("system trash");
+  await expect(readFile(join(testVaultPath, "to-system-trash.png")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("delete_file reports missing file", async () => {
+  const result = await fileSystem.deleteFile({
+    path: "nope.bin",
+    confirmPath: "nope.bin"
+  });
+
+  expect(result.success).toBe(false);
+  expect(result.message).toContain("File not found");
+});

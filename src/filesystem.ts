@@ -1,11 +1,20 @@
-import { join, resolve, relative, dirname } from 'path';
-import { readdir, stat, readFile, writeFile, unlink, mkdir, access, rename, copyFile } from 'node:fs/promises';
+import { join, resolve, relative, dirname, isAbsolute } from 'path';
+import { readdir, stat, lstat, readFile, writeFile, unlink, mkdir, access, rename, copyFile } from 'node:fs/promises';
 import { constants, realpathSync } from 'node:fs';
 import trash from 'trash';
 import { FrontmatterHandler } from './frontmatter.js';
 import { PathFilter } from './pathfilter.js';
 import { generateObsidianUri } from './uri.js';
-import type { ParsedNote, DirectoryListing, NoteWriteParams, DeleteNoteParams, DeleteResult, MoveNoteParams, MoveFileParams, MoveResult, BatchReadParams, BatchReadResult, UpdateFrontmatterParams, NoteInfo, TagManagementParams, TagManagementResult, PatchNoteParams, PatchNoteResult, VaultStats } from './types.js';
+import type { ParsedNote, DirectoryListing, NoteWriteParams, DeleteNoteParams, DeleteFileParams, DeleteResult, UploadFileParams, UploadResult, MoveNoteParams, MoveFileParams, MoveResult, BatchReadParams, BatchReadResult, UpdateFrontmatterParams, NoteInfo, TagManagementParams, TagManagementResult, PatchNoteParams, PatchNoteResult, VaultStats } from './types.js';
+
+const DEFAULT_UPLOAD_MAX_SIZE_MB = 50;
+
+function getUploadMaxSizeBytes(): number {
+  const raw = process.env.MCPVAULT_UPLOAD_MAX_SIZE_MB;
+  const mb = raw !== undefined ? parseFloat(raw) : DEFAULT_UPLOAD_MAX_SIZE_MB;
+  const effective = Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_UPLOAD_MAX_SIZE_MB;
+  return Math.floor(effective * 1024 * 1024);
+}
 
 export class FileSystemService {
   private frontmatterHandler: FrontmatterHandler;
@@ -696,6 +705,245 @@ export class FileSystemService {
         oldPath,
         newPath,
         message: `Failed to move file: ${error instanceof Error ? error.message : 'Unknown error'}`
+      };
+    }
+  }
+
+  async uploadFile(params: UploadFileParams): Promise<UploadResult> {
+    const { sourcePath, vaultPath, overwrite = false } = params;
+
+    if (!sourcePath || typeof sourcePath !== 'string') {
+      return {
+        success: false,
+        vaultPath,
+        message: `sourcePath is required and must be a string.`
+      };
+    }
+
+    if (!isAbsolute(sourcePath)) {
+      return {
+        success: false,
+        vaultPath,
+        message: `sourcePath must be an absolute path: ${sourcePath}. Provide an absolute path to the file on the host filesystem.`
+      };
+    }
+
+    if (!this.pathFilter.isAllowedForListing(vaultPath)) {
+      return {
+        success: false,
+        vaultPath,
+        message: `Access denied: ${vaultPath}. This path is restricted (system files like .obsidian, .git, and dotfiles are not accessible).`
+      };
+    }
+
+    let targetFullPath: string;
+    try {
+      targetFullPath = this.resolvePath(vaultPath);
+    } catch (error) {
+      return {
+        success: false,
+        vaultPath,
+        message: error instanceof Error ? error.message : 'Failed to resolve vault path'
+      };
+    }
+
+    let sourceSize: number;
+    try {
+      const lstats = await lstat(sourcePath);
+      if (lstats.isSymbolicLink()) {
+        return {
+          success: false,
+          vaultPath,
+          message: `Source path is a symbolic link: ${sourcePath}. For safety, symlinks are not followed during upload.`
+        };
+      }
+      if (!lstats.isFile()) {
+        return {
+          success: false,
+          vaultPath,
+          message: `Source is not a regular file: ${sourcePath}.`
+        };
+      }
+      sourceSize = lstats.size;
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          success: false,
+          vaultPath,
+          message: `Source file not found: ${sourcePath}.`
+        };
+      }
+      return {
+        success: false,
+        vaultPath,
+        message: `Failed to inspect source file: ${error instanceof Error ? error.message : 'Unknown error'}`
+      };
+    }
+
+    if (resolve(sourcePath) === targetFullPath) {
+      return {
+        success: false,
+        vaultPath,
+        message: `Source and target resolve to the same path: ${sourcePath}.`
+      };
+    }
+
+    const sizeLimit = getUploadMaxSizeBytes();
+    if (sourceSize > sizeLimit) {
+      const limitMb = Math.round(sizeLimit / 1024 / 1024 * 100) / 100;
+      const sourceMb = Math.round(sourceSize / 1024 / 1024 * 100) / 100;
+      return {
+        success: false,
+        vaultPath,
+        message: `Source file (${sourceMb}MB) exceeds upload size limit (${limitMb}MB). Set MCPVAULT_UPLOAD_MAX_SIZE_MB to change the limit.`
+      };
+    }
+
+    try {
+      await mkdir(dirname(targetFullPath), { recursive: true });
+
+      const flag = overwrite ? 0 : constants.COPYFILE_EXCL;
+      await copyFile(sourcePath, targetFullPath, flag);
+
+      return {
+        success: true,
+        vaultPath,
+        bytes: sourceSize,
+        message: `Successfully uploaded ${sourceSize} bytes to ${vaultPath}`
+      };
+    } catch (error) {
+      if (error instanceof Error && 'code' in error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') {
+          return {
+            success: false,
+            vaultPath,
+            message: `Target file already exists: ${vaultPath}. Use overwrite=true to replace it.`
+          };
+        }
+        if (code === 'EACCES') {
+          return {
+            success: false,
+            vaultPath,
+            message: `Permission denied writing to ${vaultPath}.`
+          };
+        }
+      }
+      return {
+        success: false,
+        vaultPath,
+        message: `Failed to upload file: ${error instanceof Error ? error.message : 'Unknown error'}`
+      };
+    }
+  }
+
+  async deleteFile(params: DeleteFileParams): Promise<DeleteResult> {
+    const { path, confirmPath, trashMode = 'none' } = params;
+
+    if (path !== confirmPath) {
+      return {
+        success: false,
+        path,
+        message: "Deletion cancelled: confirmation path does not match. For safety, both 'path' and 'confirmPath' must be identical."
+      };
+    }
+
+    if (!this.pathFilter.isAllowedForListing(path)) {
+      return {
+        success: false,
+        path,
+        message: `Access denied: ${path}. This path is restricted (system files like .obsidian, .git, and dotfiles are not accessible).`
+      };
+    }
+
+    let fullPath: string;
+    try {
+      fullPath = this.resolvePath(path);
+    } catch (error) {
+      return {
+        success: false,
+        path,
+        message: error instanceof Error ? error.message : 'Failed to resolve path'
+      };
+    }
+
+    try {
+      const isDir = await this.isDirectory(path);
+      if (isDir) {
+        return {
+          success: false,
+          path,
+          message: `Cannot delete: ${path} is not a file`
+        };
+      }
+
+      if (trashMode === 'local') {
+        const trashDir = join(this.vaultPath, '.trash');
+        const trashPath = join(trashDir, path);
+
+        await mkdir(dirname(trashPath), { recursive: true });
+
+        let finalTrashPath = trashPath;
+        try {
+          await access(finalTrashPath, constants.F_OK);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const lastSlash = path.lastIndexOf('/');
+          const lastDot = path.lastIndexOf('.');
+          const ext = lastDot > lastSlash ? path.slice(lastDot) : '';
+          const base = ext ? path.slice(0, -ext.length) : path;
+          const collidedPath = `${base}-${timestamp}${ext}`;
+          finalTrashPath = join(trashDir, collidedPath);
+        } catch {
+          // No collision in trash
+        }
+
+        await rename(fullPath, finalTrashPath);
+
+        return {
+          success: true,
+          path,
+          message: `Successfully moved file to vault trash: ${path}`
+        };
+      }
+
+      if (trashMode === 'system') {
+        await trash(fullPath);
+        return {
+          success: true,
+          path,
+          message: `Successfully moved file to system trash: ${path}`
+        };
+      }
+
+      await unlink(fullPath);
+
+      return {
+        success: true,
+        path,
+        message: `Successfully deleted file: ${path}. This action cannot be undone.`
+      };
+    } catch (error) {
+      if (error instanceof Error && 'code' in error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          return {
+            success: false,
+            path,
+            message: `File not found: ${path}. Use list_directory to see available files.`
+          };
+        }
+        if (code === 'EACCES') {
+          return {
+            success: false,
+            path,
+            message: `Permission denied: ${path}. The file exists but cannot be deleted due to filesystem permissions.`
+          };
+        }
+      }
+      return {
+        success: false,
+        path,
+        message: `Failed to delete file: ${path} - ${error instanceof Error ? error.message : 'Unknown error'}`
       };
     }
   }

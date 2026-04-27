@@ -32,9 +32,28 @@ export interface DeleteNoteParams {
   trashMode?: 'none' | 'local' | 'system';
 }
 
+export interface DeleteFileParams {
+  path: string;
+  confirmPath: string;
+  trashMode?: 'none' | 'local' | 'system';
+}
+
 export interface DeleteResult {
   success: boolean;
   path: string;
+  message: string;
+}
+
+export interface UploadFileParams {
+  sourcePath: string;
+  vaultPath: string;
+  overwrite?: boolean;
+}
+
+export interface UploadResult {
+  success: boolean;
+  vaultPath: string;
+  bytes?: number;
   message: string;
 }
 

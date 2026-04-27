@@ -227,6 +227,32 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
               prettyPrint: { type: "boolean", description: "Format JSON response with indentation (default: false)", default: false }
             }
           }
+        },
+        {
+          name: "upload_file",
+          description: "Copy any file (binary-safe: images, PDFs, etc.) from the host filesystem into the vault. The server reads bytes directly from disk so the agent's context cost is near zero. Size limit is configurable via MCPVAULT_UPLOAD_MAX_SIZE_MB (default 50MB).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              sourcePath: { type: "string", description: "Absolute path to the source file on the host filesystem (symlinks are rejected)" },
+              vaultPath: { type: "string", description: "Target path inside the vault, relative to vault root" },
+              overwrite: { type: "boolean", description: "Allow overwriting an existing target file (default: false)", default: false }
+            },
+            required: ["sourcePath", "vaultPath"]
+          }
+        },
+        {
+          name: "delete_file",
+          description: "Delete any file (binary-safe, file-only, requires confirmation). Mirrors delete_note but works on any extension (images, PDFs, etc.). Supports permanent delete, vault trash, or system trash.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the file relative to vault root" },
+              confirmPath: { type: "string", description: "Confirmation: must exactly match the path parameter to proceed with deletion" },
+              trashMode: { type: "string", enum: ["none", "local", "system"], description: "Deletion mode: 'none' = permanent delete (default), 'local' = move to .trash inside vault, 'system' = move to OS trash", default: "none" }
+            },
+            required: ["path", "confirmPath"]
+          }
         }
       ]
     };
@@ -404,6 +430,30 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
           };
         }
 
+        case "upload_file": {
+          const result = await fileSystem.uploadFile({
+            sourcePath: trimmedArgs.sourcePath,
+            vaultPath: trimmedArgs.vaultPath,
+            overwrite: trimmedArgs.overwrite
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            isError: !result.success
+          };
+        }
+
+        case "delete_file": {
+          const result = await fileSystem.deleteFile({
+            path: trimmedArgs.path,
+            confirmPath: trimmedArgs.confirmPath,
+            trashMode: trimmedArgs.trashMode
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            isError: !result.success
+          };
+        }
+
         default:
           throw new Error(`Unknown tool: ${toolName}`);
       }
@@ -427,6 +477,8 @@ function trimPaths(args: any): any {
   if (trimmed.confirmPath && typeof trimmed.confirmPath === 'string') trimmed.confirmPath = trimmed.confirmPath.trim();
   if (trimmed.confirmOldPath && typeof trimmed.confirmOldPath === 'string') trimmed.confirmOldPath = trimmed.confirmOldPath.trim();
   if (trimmed.confirmNewPath && typeof trimmed.confirmNewPath === 'string') trimmed.confirmNewPath = trimmed.confirmNewPath.trim();
+  if (trimmed.sourcePath && typeof trimmed.sourcePath === 'string') trimmed.sourcePath = trimmed.sourcePath.trim();
+  if (trimmed.vaultPath && typeof trimmed.vaultPath === 'string') trimmed.vaultPath = trimmed.vaultPath.trim();
 
   if (trimmed.paths && Array.isArray(trimmed.paths)) {
     trimmed.paths = trimmed.paths.map((p: any) => typeof p === 'string' ? p.trim() : p);
